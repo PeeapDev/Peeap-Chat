@@ -1,0 +1,17 @@
+{
+  "name": "Peeap Chat",
+  "short_name": "Chat",
+  "description": "Real-time messaging for Peeap Pay",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#030712",
+  "theme_color": "#030712",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/favicon.ico",
+      "sizes": "64x64",
+      "type": "image/x-icon"
+    }
+  ]
+}
