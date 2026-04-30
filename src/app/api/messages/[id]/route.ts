@@ -42,7 +42,7 @@ export async function PUT(
     // Get message
     const { data: message, error: msgError } = await supabase
       .from("messages")
-      .select("id, sender_id, created_at, is_deleted")
+      .select("id, sender_id, created_at, is_deleted, metadata")
       .eq("id", params.id)
       .single();
 
@@ -50,6 +50,14 @@ export async function PUT(
       return NextResponse.json(
         { error: "Message not found" },
         { status: 404, headers }
+      );
+    }
+
+    // Ecommerce transaction messages cannot be edited
+    if ((message.metadata as Record<string, unknown>)?.source === "ecommerce") {
+      return NextResponse.json(
+        { error: "Transaction messages cannot be edited" },
+        { status: 403, headers }
       );
     }
 
@@ -147,7 +155,7 @@ export async function DELETE(
     // Get message
     const { data: message, error: msgError } = await supabase
       .from("messages")
-      .select("id, sender_id, conversation_id")
+      .select("id, sender_id, conversation_id, metadata")
       .eq("id", params.id)
       .single();
 
@@ -155,6 +163,14 @@ export async function DELETE(
       return NextResponse.json(
         { error: "Message not found" },
         { status: 404, headers }
+      );
+    }
+
+    // Ecommerce transaction messages cannot be deleted — they are permanent records
+    if ((message.metadata as Record<string, unknown>)?.source === "ecommerce") {
+      return NextResponse.json(
+        { error: "Transaction messages cannot be deleted" },
+        { status: 403, headers }
       );
     }
 

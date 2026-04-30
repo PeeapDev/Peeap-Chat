@@ -8,6 +8,8 @@ import type {
   ChatUser,
   MessageType,
   UnreadInfo,
+  FriendRequest,
+  Contact,
 } from "./types";
 
 class ChatAPI {
@@ -189,6 +191,38 @@ class ChatAPI {
 
   async getUnreadCount(): Promise<UnreadInfo> {
     return this.request("/api/unread-count");
+  }
+
+  // ── Friends ───────────────────────────────────────────────
+
+  async getFriends(): Promise<{ friends: Contact[] }> {
+    return this.request("/api/friends");
+  }
+
+  async removeFriend(userId: string): Promise<void> {
+    await this.request(`/api/friends?userId=${userId}`, { method: "DELETE" });
+  }
+
+  async sendFriendRequest(receiverId: string, message?: string): Promise<{ request?: FriendRequest; status?: string; message?: string }> {
+    return this.request("/api/friends/request", {
+      method: "POST",
+      body: JSON.stringify({ receiver_id: receiverId, message }),
+    });
+  }
+
+  async getFriendRequests(): Promise<{
+    incoming: FriendRequest[];
+    outgoing: FriendRequest[];
+    incoming_count: number;
+  }> {
+    return this.request("/api/friends/request");
+  }
+
+  async respondToFriendRequest(requestId: string, action: "accept" | "reject"): Promise<{ status: string }> {
+    return this.request(`/api/friends/request/${requestId}/respond`, {
+      method: "POST",
+      body: JSON.stringify({ action }),
+    });
   }
 }
 

@@ -33,19 +33,24 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { order_id, store_id, buyer_user_id, seller_user_id, category, content, rich_content, tracking_number } = parsed.data;
+    const { order_id, store_id, buyer_user_id, seller_user_id, category, content, rich_content, tracking_number, driver_user_id } = parsed.data;
+
+    // For driver_assigned, the conversation is between driver and buyer
+    const isDriverMessage = category === "driver_assigned" && driver_user_id;
+    const participant1 = isDriverMessage ? driver_user_id : buyer_user_id;
+    const participant2 = isDriverMessage ? buyer_user_id : seller_user_id;
 
     // Ensure both users exist in chat_users
     await Promise.all([
-      getChatUser(buyer_user_id),
-      getChatUser(seller_user_id),
+      getChatUser(participant1),
+      getChatUser(participant2),
     ]);
 
-    // Get or create conversation between buyer and seller
+    // Get or create conversation between the two participants
     const { data: convId, error: convError } = await supabase
       .rpc("get_or_create_ecommerce_conversation", {
-        p_buyer_id: buyer_user_id,
-        p_seller_id: seller_user_id,
+        p_buyer_id: participant1,
+        p_seller_id: participant2,
       });
 
     if (convError || !convId) {
@@ -58,11 +63,13 @@ export async function POST(request: NextRequest) {
 
     // Map category to message type
     const messageTypeMap: Record<string, string> = {
-      order_created: "invoice",
+      order_created: "order_update",
+      order_update: "order_update",
       invoice: "invoice",
       shipping_update: "shipping_update",
       delivery_confirmed: "order_update",
       product_card: "product_card",
+      driver_assigned: "shipping_update",
     };
 
     const messageType = messageTypeMap[category] || "system";
@@ -92,6 +99,9 @@ export async function POST(request: NextRequest) {
           messageContent = `Shipping update for order #${order_id}`;
           if (tracking_number) messageContent += ` (Tracking: ${tracking_number})`;
           break;
+        case "order_update":
+          messageContent = `Order #${order_id} status updated`;
+          break;
         case "delivery_confirmed":
           messageContent = `Order #${order_id} has been delivered`;
           break;
@@ -101,8 +111,8 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Determine sender: seller for invoices, system for shipping
-    const senderId = category === "shipping_update" ? seller_user_id : seller_user_id;
+    // Determine sender based on category
+    const senderId = isDriverMessage ? driver_user_id : seller_user_id;
 
     // Create the message
     const { data: message, error: msgError } = await supabase
@@ -144,6 +154,38 @@ export async function POST(request: NextRequest) {
     if (ecomError) {
       console.error("Failed to track ecommerce message:", ecomError);
       // Non-critical - message was already sent
+    }
+
+    // ── Create notification on the main Peeap Supabase (for NotificationBell) ──
+    // This ensures the bell shows unread chat messages.
+    const recipientId = isDriverMessage ? buyer_user_id : (senderId === buyer_user_id ? seller_user_id : buyer_user_id);
+    if (recipientId) {
+      try {
+        const MAIN_API = process.env.MAIN_API_URL || "https://api.peeap.com";
+        const SERVICE_SECRET = process.env.SERVICE_SECRET || "";
+        // Extract a preview of the message content
+        const preview = (messageContent || "").slice(0, 100);
+        const storeName = (rich_content as any)?.store_name || "Peeap";
+        await fetch(`${MAIN_API}/api/notifications/internal`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Service-Secret": SERVICE_SECRET,
+          },
+          body: JSON.stringify({
+            user_id: recipientId,
+            type: "chat_message",
+            title: `New message from ${storeName}`,
+            message: preview,
+            action_url: "/messages",
+            source_service: "chat",
+            priority: "normal",
+          }),
+        });
+      } catch (notifErr) {
+        console.warn("[ChatMessage] Failed to create notification:", notifErr);
+        // Non-critical
+      }
     }
 
     return NextResponse.json(

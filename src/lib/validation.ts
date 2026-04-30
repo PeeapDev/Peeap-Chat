@@ -147,10 +147,15 @@ export const EcommerceMessageSchema = z.object({
   store_id: z.string().min(1),
   buyer_user_id: z.string().uuid(),
   seller_user_id: z.string().uuid(),
-  category: z.enum(["order_created", "invoice", "shipping_update", "delivery_confirmed", "product_card"]),
+  category: z.enum([
+    "order_created", "order_update", "invoice", "shipping_update",
+    "delivery_confirmed", "product_card", "driver_assigned",
+  ]),
   content: z.string().max(10000).optional(),
   rich_content: z.record(z.any()).optional(),
   tracking_number: z.string().optional(),
+  // Optional: for driver-specific messages
+  driver_user_id: z.string().uuid().optional(),
 });
 
 // ============================================================

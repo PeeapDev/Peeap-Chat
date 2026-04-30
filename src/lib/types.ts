@@ -205,6 +205,30 @@ export interface PaymentRequest {
   created_at: string;
 }
 
+// Friend system types
+export interface FriendRequest {
+  id: string;
+  sender_id: string;
+  receiver_id: string;
+  message: string;
+  status: "pending" | "accepted" | "rejected" | "cancelled";
+  created_at: string;
+  responded_at: string | null;
+  sender?: ChatUser;
+  receiver?: ChatUser;
+}
+
+export interface Contact {
+  id: string;
+  user_id: string;
+  contact_user_id: string;
+  nickname: string | null;
+  is_blocked: boolean;
+  is_favorite: boolean;
+  created_at: string;
+  profile?: ChatUser;
+}
+
 export interface UnreadInfo {
   total_unread: number;
   conversations: Array<{
