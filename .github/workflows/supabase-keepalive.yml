@@ -1,0 +1,64 @@
+name: Chat Supabase keepalive
+
+# Free-tier Supabase pauses a project after ~7 days with no requests, then
+# eventually DELETES it. Chat already died this way once (paused 2026-04-30).
+# This workflow pings the Chat Supabase project on a schedule with a REAL
+# table query — a bare /rest/v1/ ping returns 401 *before* hitting Postgres
+# and may not count as activity, so we query an actual chat table instead.
+#
+# Cadence: every 3 days (NOT 5). GitHub's scheduler routinely delays or skips
+# scheduled runs under load; a single missed 5-day run would cross the 7-day
+# pause threshold. 3 days leaves a safety buffer. Change `*/3` below to `*/5`
+# if you accept that risk.
+#
+# A failed ping FAILS the workflow so GitHub emails the repo owner — silent
+# ::warning::s are how chat died unnoticed last time.
+#
+# ── One-time setup ──────────────────────────────────────────────────────────
+#   Repo → Settings → Secrets and variables → Actions:
+#     Secret  CHAT_SUPABASE_ANON_KEY  — the chat project's anon (public) key
+#     Variable CHAT_SUPABASE_URL      — optional; defaults to the value below
+#   (The anon key is safe to use here; it's the public client key, RLS-gated.)
+
+on:
+  schedule:
+    - cron: '0 9 */3 * *'   # every 3 days at 09:00 UTC
+  workflow_dispatch: {}      # manual run button in the Actions tab
+
+concurrency:
+  group: chat-keepalive
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    name: Ping Chat Supabase
+    runs-on: ubuntu-latest
+    steps:
+      - name: Real query against the chat DB
+        env:
+          SUPABASE_URL: ${{ vars.CHAT_SUPABASE_URL || 'https://vksavlswhatwqglsbnfi.supabase.co' }}
+          ANON_KEY: ${{ secrets.CHAT_SUPABASE_ANON_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${ANON_KEY:-}" ]; then
+            echo "::error::CHAT_SUPABASE_ANON_KEY secret is not set. Add it under repo Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+
+          # Query a real chat table so the request reaches Postgres (counts as
+          # activity even if RLS returns an empty set). 2xx–4xx => project is
+          # awake; 000 (DNS dead) or 5xx => paused/deleted/erroring.
+          url="$SUPABASE_URL/rest/v1/conversations?select=id&limit=1"
+          echo "→ GET $url"
+          code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 20 \
+            -H "apikey: $ANON_KEY" \
+            -H "Authorization: Bearer $ANON_KEY" \
+            "$url")
+
+          if [ "$code" -ge 200 ] && [ "$code" -lt 500 ]; then
+            echo "✓ Chat Supabase is awake (HTTP $code)"
+          else
+            echo "::error::Chat Supabase unreachable (HTTP $code) — it may be paused, deleted, or erroring. Visit the Supabase dashboard to restore it."
+            exit 1
+          fi
