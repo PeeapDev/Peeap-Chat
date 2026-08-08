@@ -33,7 +33,22 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { order_id, store_id, buyer_user_id, seller_user_id, category, content, rich_content, tracking_number, driver_user_id } = parsed.data;
+    const { order_id, store_id, buyer_user_id, seller_user_id, category, content, rich_content, tracking_number, driver_user_id, idempotency_key } = parsed.data;
+
+    if (idempotency_key) {
+      const { data: existing } = await supabase
+        .from("messages")
+        .select("id, conversation_id, created_at")
+        .contains("metadata", { idempotency_key })
+        .limit(1)
+        .maybeSingle();
+      if (existing) {
+        return NextResponse.json(
+          { message: existing, conversation_id: existing.conversation_id, deduplicated: true },
+          { status: 200, headers }
+        );
+      }
+    }
 
     // For driver_assigned, the conversation is between driver and buyer
     const isDriverMessage = category === "driver_assigned" && driver_user_id;
@@ -123,7 +138,7 @@ export async function POST(request: NextRequest) {
         content: messageContent,
         message_type: messageType,
         rich_content: messageRichContent,
-        metadata: { source: "ecommerce", order_id, store_id },
+        metadata: { source: "ecommerce", order_id, store_id, ...(idempotency_key ? { idempotency_key } : {}) },
       })
       .select()
       .single();
@@ -179,6 +194,7 @@ export async function POST(request: NextRequest) {
             message: preview,
             action_url: "/messages",
             source_service: "chat",
+            source_id: message?.id,
             priority: "normal",
           }),
         });

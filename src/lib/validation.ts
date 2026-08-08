@@ -159,6 +159,26 @@ export const EcommerceMessageSchema = z.object({
   tracking_number: z.string().optional(),
   // Optional: for driver-specific messages
   driver_user_id: z.string().uuid().optional(),
+  idempotency_key: z.string().min(1).max(300).optional(),
+});
+
+export const TransactionalMessageSchema = z.object({
+  idempotency_key: z.string().min(1).max(300),
+  recipient_user_id: z.string().uuid(),
+  channel: z.enum(["payments", "marketplace", "school", "invoices", "receipts"]),
+  event_type: z.string().min(1).max(100),
+  title: z.string().min(1).max(200),
+  content: z.string().min(1).max(10000),
+  message_type: z.enum([
+    "text", "invoice", "receipt", "payment_request", "payment_confirmation",
+    "fee_notice", "salary_slip", "announcement", "system",
+  ]).default("system"),
+  rich_content: z.record(z.any()).optional(),
+  action_url: z.string().max(2000).optional(),
+  source_service: z.string().min(1).max(100),
+  source_id: z.string().min(1).max(300),
+  priority: z.enum(["low", "normal", "high", "urgent"]).default("normal"),
+  send_push: z.boolean().default(true),
 });
 
 // ============================================================
