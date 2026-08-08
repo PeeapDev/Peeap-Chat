@@ -7,7 +7,7 @@
 import type { Conversation, Message, ChatUser } from "./types";
 
 const DB_NAME = "peeap-chat";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 interface AuthRecord {
   token: string;
@@ -38,6 +38,10 @@ async function getDB() {
         }
         if (!db.objectStoreNames.contains("users")) {
           db.createObjectStore("users", { keyPath: "id" });
+        }
+        // v2: E2EE identity material (private key + device id), on-device only.
+        if (!db.objectStoreNames.contains("e2ee")) {
+          db.createObjectStore("e2ee");
         }
       },
     });
@@ -142,13 +146,62 @@ export async function loadUser(userId: string): Promise<ChatUser | null> {
   return (await db.get("users", userId)) ?? null;
 }
 
+// ── E2EE identity (private key + device id) ──────────────────
+// Stored per (userId) so switching accounts on a shared device doesn't leak
+// one user's private key to another.
+
+interface E2EEIdentityRecord {
+  userId: string;
+  privateKeyB64: string; // PKCS8 base64 of the ECDH identity private key
+  publicKeyB64: string; // SPKI base64
+  deviceId: string;
+  savedAt: number;
+}
+
+export async function saveE2EEIdentity(rec: {
+  userId: string;
+  privateKeyB64: string;
+  publicKeyB64: string;
+  deviceId: string;
+}): Promise<void> {
+  const db = await getDB();
+  if (!db) return;
+  const record: E2EEIdentityRecord = { ...rec, savedAt: Date.now() };
+  await db.put("e2ee", record, `identity:${rec.userId}`);
+}
+
+export async function loadE2EEIdentity(
+  userId: string
+): Promise<E2EEIdentityRecord | null> {
+  const db = await getDB();
+  if (!db) return null;
+  return (await db.get("e2ee", `identity:${userId}`)) ?? null;
+}
+
+export async function clearE2EEIdentity(userId: string): Promise<void> {
+  const db = await getDB();
+  if (!db) return;
+  await db.delete("e2ee", `identity:${userId}`);
+}
+
+// A stable per-device id, generated once and reused across accounts.
+export async function getOrCreateDeviceId(): Promise<string> {
+  const db = await getDB();
+  if (!db) return "web-ephemeral";
+  const existing = await db.get("e2ee", "device_id");
+  if (existing) return existing as string;
+  const id = `web-${crypto.randomUUID()}`;
+  await db.put("e2ee", id, "device_id");
+  return id;
+}
+
 // ── Clear all data (logout) ──────────────────────────────────
 
 export async function clearAllData(): Promise<void> {
   const db = await getDB();
   if (!db) return;
   const tx = db.transaction(
-    ["auth", "conversations", "messages", "users"],
+    ["auth", "conversations", "messages", "users", "e2ee"],
     "readwrite"
   );
   await Promise.all([
@@ -156,6 +209,7 @@ export async function clearAllData(): Promise<void> {
     tx.objectStore("conversations").clear(),
     tx.objectStore("messages").clear(),
     tx.objectStore("users").clear(),
+    tx.objectStore("e2ee").clear(),
     tx.done,
   ]);
 }

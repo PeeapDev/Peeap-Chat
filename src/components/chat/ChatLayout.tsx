@@ -6,6 +6,7 @@ import Sidebar from "./Sidebar";
 import ChatPanel from "./ChatPanel";
 import QRLoginScreen from "./QRLoginScreen";
 import NewChatModal from "@/components/modals/NewChatModal";
+import E2EESetupModal from "@/components/modals/E2EESetupModal";
 import { AlertCircle, X } from "lucide-react";
 
 export default function ChatLayout() {
@@ -59,6 +60,9 @@ export default function ChatLayout() {
 
       {/* New chat modal */}
       <NewChatModal open={newChatOpen} onClose={() => setNewChatOpen(false)} />
+
+      {/* E2EE setup / unlock prompt (shows when keys need creating or restoring) */}
+      <E2EESetupModal />
     </div>
   );
 }

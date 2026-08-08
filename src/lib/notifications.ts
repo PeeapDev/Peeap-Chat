@@ -22,7 +22,12 @@ export function showNotification(
   body: string,
   opts?: { icon?: string; tag?: string; onClick?: () => void }
 ) {
-  if (permission !== "granted") return;
+  if (typeof window === "undefined" || !("Notification" in window)) return;
+  // Read the live browser permission, not the cached module variable — a
+  // returning user may have granted permission in a prior session without this
+  // load calling requestNotificationPermission(), which would leave the cached
+  // value at "default" and silently suppress every notification.
+  if (Notification.permission !== "granted") return;
   if (document.hasFocus()) return; // Don't notify if tab is active
 
   const n = new Notification(title, {

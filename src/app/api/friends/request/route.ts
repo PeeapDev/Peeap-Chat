@@ -37,6 +37,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "receiver_id is required" }, { status: 400, headers });
   }
 
+  // Must be a UUID before it is interpolated into the PostgREST .or() filter
+  // below — otherwise metacharacters (`,` `.` `(` `)`) break out of the
+  // intended predicate (filter injection).
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (!UUID_RE.test(receiver_id)) {
+    return NextResponse.json({ error: "invalid receiver_id" }, { status: 400, headers });
+  }
+
   if (receiver_id === auth.sub) {
     return NextResponse.json({ error: "Cannot send friend request to yourself" }, { status: 400, headers });
   }

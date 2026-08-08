@@ -66,13 +66,16 @@ export async function POST(
       );
     }
 
-    const { command, args, pin_verified } = parsed.data;
+    const { command, args, pin } = parsed.data;
     const requiresPin = isFinancialCommand(command);
 
-    // Financial commands require PIN verification
-    if (requiresPin && !pin_verified) {
+    // Financial commands require a PIN. We do NOT trust any client-asserted
+    // "already verified" flag — the raw PIN is forwarded to the main Peeap API
+    // (/api/shared/transfer), which verifies it server-side against the user's
+    // transaction_pin. Without a PIN here, a money-moving command is rejected.
+    if (requiresPin && !pin) {
       return NextResponse.json(
-        { error: "PIN verification required for financial commands", requires_pin: true },
+        { error: "PIN required for financial commands", requires_pin: true },
         { status: 403, headers }
       );
     }
@@ -108,17 +111,21 @@ export async function POST(
       switch (command) {
         case "send": {
           // /send @username amount - Transfer money
-          const { recipient_id, amount, currency = "SLE" } = args as {
+          const { recipient_id, currency = "SLE" } = args as {
             recipient_id?: string;
-            amount?: number;
             currency?: string;
           };
+          const amount = Number((args as { amount?: unknown }).amount);
 
-          if (!recipient_id || !amount) {
-            throw new Error("Missing recipient_id or amount");
+          if (!recipient_id) {
+            throw new Error("Missing recipient_id");
+          }
+          if (!Number.isFinite(amount) || amount <= 0) {
+            throw new Error("Amount must be a positive number");
           }
 
-          // Call main Peeap API to execute transfer
+          // Call main Peeap API to execute transfer. The raw PIN is verified
+          // SERVER-SIDE by the main API — chat never asserts verification itself.
           const transferRes = await fetch(`${PEEAP_API_URL}/api/shared/transfer`, {
             method: "POST",
             headers: {
@@ -129,8 +136,10 @@ export async function POST(
             body: JSON.stringify({
               sender_id: userId,
               recipient_id,
+              recipientId: recipient_id,
               amount,
               currency,
+              pin,
               description: `Chat transfer via /send`,
             }),
           });
@@ -140,6 +149,9 @@ export async function POST(
             throw new Error(transferData.error || "Transfer failed");
           }
 
+          // The main API returns camelCase (transactionId). Accept both so the
+          // confirmation card always has the reference.
+          const txId = transferData.transactionId ?? transferData.transaction_id ?? null;
           result = transferData;
           messageType = "payment_confirmation";
           messageContent = `Sent ${currency} ${amount.toLocaleString()} via chat`;
@@ -148,24 +160,32 @@ export async function POST(
             amount,
             currency,
             recipient_id,
-            transaction_id: transferData.transaction_id,
+            transaction_id: txId,
           };
           break;
         }
 
         case "invoice": {
           // /invoice - Create an invoice
-          const { amount, description, items, due_date, currency = "SLE" } = args as {
-            amount?: number;
+          const { description, items, due_date, currency = "SLE" } = args as {
             description?: string;
             items?: Array<{ name: string; amount: number }>;
             due_date?: string;
             currency?: string;
           };
+          const amount = Number((args as { amount?: unknown }).amount);
 
-          if (!amount) {
-            throw new Error("Missing amount for invoice");
+          if (!Number.isFinite(amount) || amount <= 0) {
+            throw new Error("Amount must be a positive number");
           }
+
+          // Coerce due_date to a valid timestamp; fall back to 7 days out if the
+          // client sent an unparseable string (a bad string would 500 the insert).
+          const parsedDue = due_date ? new Date(due_date) : null;
+          const expiresAt =
+            parsedDue && !isNaN(parsedDue.getTime())
+              ? parsedDue.toISOString()
+              : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
 
           // Create payment request record
           const { data: paymentReq, error: prError } = await supabase
@@ -178,7 +198,7 @@ export async function POST(
               currency,
               status: "pending",
               invoice_data: { description, items, due_date },
-              expires_at: due_date || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+              expires_at: expiresAt,
             })
             .select()
             .single();
@@ -202,14 +222,14 @@ export async function POST(
 
         case "request": {
           // /request amount - Request money
-          const { amount, note, currency = "SLE" } = args as {
-            amount?: number;
+          const { note, currency = "SLE" } = args as {
             note?: string;
             currency?: string;
           };
+          const amount = Number((args as { amount?: unknown }).amount);
 
-          if (!amount) {
-            throw new Error("Missing amount for request");
+          if (!Number.isFinite(amount) || amount <= 0) {
+            throw new Error("Amount must be a positive number");
           }
 
           const { data: paymentReq } = await supabase
@@ -241,12 +261,14 @@ export async function POST(
         }
 
         case "transaction": {
-          // /transaction - Share past transaction details
+          // /transaction - Share past transaction details.
+          // The main API's shared/wallet/transactions returns a PAGINATED LIST
+          // (it has no single-transaction lookup), so we fetch the recent page
+          // and pick the requested one (by id or reference) or the latest.
           const { transaction_id } = args as { transaction_id?: string };
 
-          // Fetch transaction from main platform
           const txRes = await fetch(
-            `${PEEAP_API_URL}/api/shared/wallet/transactions?transaction_id=${transaction_id || "latest"}`,
+            `${PEEAP_API_URL}/api/shared/wallet/transactions?limit=50`,
             {
               headers: {
                 "X-Service-Secret": SERVICE_SECRET,
@@ -255,13 +277,30 @@ export async function POST(
             }
           );
 
+          if (!txRes.ok) {
+            throw new Error("Failed to fetch transactions");
+          }
+
           const txData = await txRes.json();
-          result = txData;
+          const list: Array<Record<string, unknown>> = txData.transactions || [];
+          const tx = transaction_id
+            ? list.find(
+                (t) => t.id === transaction_id || t.reference === transaction_id
+              )
+            : list[0];
+
+          if (!tx) {
+            throw new Error(
+              transaction_id ? "Transaction not found" : "No transactions yet"
+            );
+          }
+
+          result = tx;
           messageType = "slash_command_result";
           messageContent = "Shared transaction details";
           richContent = {
             type: "transaction_share",
-            transaction: txData.transaction || txData,
+            transaction: tx,
           };
           break;
         }
@@ -277,21 +316,26 @@ export async function POST(
             throw new Error("Missing product_id");
           }
 
-          // Fetch product from POS service
+          // Fetch product from POS service (single-product endpoint).
           const productRes = await fetch(
-            `${process.env.POS_API_URL || "https://store.peeap.com"}/api/products/${product_id}`,
+            `${process.env.POS_API_URL || "https://store.peeap.com"}/api/products/${encodeURIComponent(product_id)}`,
             {
               headers: { "X-Service-Secret": SERVICE_SECRET },
             }
           );
 
-          const productData = await productRes.json();
+          if (!productRes.ok) {
+            throw new Error("Product not found");
+          }
+
+          const productBody = await productRes.json();
+          const productData = productBody.product || productBody;
           result = productData;
           messageType = "product_card";
           messageContent = productData.name || "Product";
           richContent = {
             product_id,
-            store_id,
+            store_id: store_id ?? productData.store_slug ?? null,
             name: productData.name,
             price: productData.price,
             currency: productData.currency || "SLE",
@@ -304,14 +348,14 @@ export async function POST(
 
         case "create": {
           // /create - Create payment link
-          const { amount, description, currency = "SLE" } = args as {
-            amount?: number;
+          const { description, currency = "SLE" } = args as {
             description?: string;
             currency?: string;
           };
+          const amount = Number((args as { amount?: unknown }).amount);
 
-          if (!amount) {
-            throw new Error("Missing amount for payment link");
+          if (!Number.isFinite(amount) || amount <= 0) {
+            throw new Error("Amount must be a positive number");
           }
 
           const createRes = await fetch(`${PEEAP_API_URL}/api/shared/checkout/create`, {
@@ -327,11 +371,14 @@ export async function POST(
           const createData = await createRes.json();
           if (!createRes.ok) throw new Error(createData.error || "Failed to create payment link");
 
+          // Main API returns camelCase (checkoutUrl / sessionId); accept both.
+          const checkoutUrl = createData.checkoutUrl ?? createData.checkout_url ?? null;
           result = createData;
           messageType = "payment_link";
           messageContent = `Payment link: ${currency} ${amount.toLocaleString()}`;
           richContent = {
-            checkout_url: createData.checkout_url,
+            checkout_url: checkoutUrl,
+            session_id: createData.sessionId ?? createData.session_id ?? null,
             amount,
             currency,
             description,
@@ -361,7 +408,10 @@ export async function POST(
           status: "completed",
           result,
           message_id: message?.id,
-          external_transaction_id: (result as { transaction_id?: string }).transaction_id || null,
+          external_transaction_id:
+            (result as { transactionId?: string; transaction_id?: string }).transactionId ||
+            (result as { transaction_id?: string }).transaction_id ||
+            null,
           completed_at: new Date().toISOString(),
         })
         .eq("id", execution.id);

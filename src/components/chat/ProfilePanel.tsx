@@ -162,7 +162,7 @@ export default function ProfilePanel({
                   Verified
                 </span>
               )}
-              {profile.roles.includes("admin") && (
+              {profile.roles?.includes("admin") && (
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-amber-600/20 border border-amber-500/30 text-amber-300 text-[11px] font-medium rounded-full">
                   <Crown size={10} />
                   Admin
@@ -297,7 +297,7 @@ export default function ProfilePanel({
                       </p>
                       <p className="text-[11px] text-indigo-400 font-medium">
                         {product.currency}{" "}
-                        {product.price.toLocaleString()}
+                        {Number(product.price || 0).toLocaleString()}
                       </p>
                     </div>
                   </button>

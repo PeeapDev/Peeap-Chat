@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import {
   Check,
   CheckCheck,
@@ -510,11 +510,21 @@ function VoiceNote({
   showSender: boolean;
 }) {
   const [playing, setPlaying] = useState(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   const rc = (message.rich_content || message.metadata || {}) as Record<string, unknown>;
   const duration = Number(rc.duration || rc.duration_seconds || 0);
   const audioUrl = message.attachments?.length
     ? String((message.attachments[0] as Record<string, string>)?.url || "")
     : null;
+
+  // Stop playback when the bubble unmounts so audio doesn't keep playing after
+  // navigating away.
+  useEffect(() => {
+    return () => {
+      audioRef.current?.pause();
+      audioRef.current = null;
+    };
+  }, []);
 
   function formatDuration(s: number) {
     const m = Math.floor(s / 60);
@@ -531,14 +541,18 @@ function VoiceNote({
       <button
         onClick={() => {
           if (!audioUrl) return;
-          const audio = new Audio(audioUrl);
+          // Pause the actual element that's playing (previously a fresh Audio
+          // was created every click, so "pause" left the old one playing and
+          // rapid clicks stacked overlapping playback).
           if (playing) {
+            audioRef.current?.pause();
             setPlaying(false);
-          } else {
-            setPlaying(true);
-            audio.play();
-            audio.onended = () => setPlaying(false);
+            return;
           }
+          const audio = audioRef.current ?? (audioRef.current = new Audio(audioUrl));
+          audio.currentTime = 0;
+          audio.onended = () => setPlaying(false);
+          void audio.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
         }}
         className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 ${
           isOwn ? "bg-white/20 hover:bg-white/30" : "bg-gray-700 hover:bg-gray-600"

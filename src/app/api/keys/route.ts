@@ -57,7 +57,9 @@ export async function POST(request: NextRequest) {
           one_time_prekeys,
         } = parsed.data;
 
-        // Upsert identity key
+        // Upsert identity key. signed_prekey_* columns are NOT NULL in the
+        // schema but optional in the ECIES model — default them so an
+        // identity-only registration still satisfies the DB.
         const { error: keyError } = await supabase
           .from("user_identity_keys")
           .upsert(
@@ -65,9 +67,9 @@ export async function POST(request: NextRequest) {
               user_id: userId,
               device_id,
               identity_public_key,
-              signed_prekey_public,
-              signed_prekey_signature,
-              signed_prekey_id,
+              signed_prekey_public: signed_prekey_public ?? identity_public_key,
+              signed_prekey_signature: signed_prekey_signature ?? "",
+              signed_prekey_id: signed_prekey_id ?? 0,
               is_active: true,
             },
             { onConflict: "user_id,device_id" }
@@ -81,32 +83,34 @@ export async function POST(request: NextRequest) {
           );
         }
 
-        // Batch insert one-time prekeys
-        const prekeys = one_time_prekeys.map((pk) => ({
-          user_id: userId,
-          device_id,
-          prekey_id: pk.prekey_id,
-          public_key: pk.public_key,
-          is_consumed: false,
-        }));
+        // Batch insert one-time prekeys (only if the client supplied any).
+        if (one_time_prekeys && one_time_prekeys.length > 0) {
+          const prekeys = one_time_prekeys.map((pk) => ({
+            user_id: userId,
+            device_id,
+            prekey_id: pk.prekey_id,
+            public_key: pk.public_key,
+            is_consumed: false,
+          }));
 
-        const { error: pkError } = await supabase
-          .from("one_time_prekeys")
-          .upsert(prekeys, { onConflict: "user_id,device_id,prekey_id" });
+          const { error: pkError } = await supabase
+            .from("one_time_prekeys")
+            .upsert(prekeys, { onConflict: "user_id,device_id,prekey_id" });
 
-        if (pkError) {
-          console.error("Failed to register one-time prekeys:", pkError);
-          return NextResponse.json(
-            { error: "Failed to register one-time prekeys" },
-            { status: 500, headers }
-          );
+          if (pkError) {
+            console.error("Failed to register one-time prekeys:", pkError);
+            return NextResponse.json(
+              { error: "Failed to register one-time prekeys" },
+              { status: 500, headers }
+            );
+          }
         }
 
         return NextResponse.json(
           {
             registered: true,
             identity_key_registered: true,
-            one_time_prekeys_count: one_time_prekeys.length,
+            one_time_prekeys_count: one_time_prekeys?.length ?? 0,
           },
           { status: 201, headers }
         );
@@ -163,6 +167,16 @@ export async function POST(request: NextRequest) {
 
         const { encrypted_bundle, salt, nonce } = parsed.data;
 
+        // Monotonically increment key_version so rotations are ordered and a
+        // stale/rolled-back bundle can't silently overwrite a newer one.
+        const { data: currentBackup } = await supabase
+          .from("encrypted_key_backups")
+          .select("key_version")
+          .eq("user_id", userId)
+          .maybeSingle();
+
+        const nextVersion = (currentBackup?.key_version ?? 0) + 1;
+
         const { error } = await supabase
           .from("encrypted_key_backups")
           .upsert(
@@ -171,7 +185,7 @@ export async function POST(request: NextRequest) {
               encrypted_bundle,
               salt,
               nonce,
-              key_version: 1, // Increment on subsequent backups
+              key_version: nextVersion,
             },
             { onConflict: "user_id" }
           );
@@ -183,7 +197,7 @@ export async function POST(request: NextRequest) {
           );
         }
 
-        return NextResponse.json({ backed_up: true }, { headers });
+        return NextResponse.json({ backed_up: true, key_version: nextVersion }, { headers });
       }
 
       default:

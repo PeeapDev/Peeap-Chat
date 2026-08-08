@@ -58,8 +58,8 @@ export function getConversationAvatar(
   return null;
 }
 
-export function getInitials(name: string): string {
-  return name
+export function getInitials(name: string | null | undefined): string {
+  return (name ?? "")
     .split(" ")
     .map((w) => w[0])
     .filter(Boolean)

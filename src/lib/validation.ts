@@ -131,7 +131,10 @@ const ALL_COMMANDS = ["invoice", "send", "request", "product", "transaction", "c
 export const ExecuteCommandSchema = z.object({
   command: z.enum(ALL_COMMANDS),
   args: z.record(z.any()).default({}),
-  pin_verified: z.boolean().optional(),
+  // Raw transaction PIN for money-moving commands. It is NEVER trusted as a
+  // client-asserted "already verified" boolean — it is forwarded to the main
+  // Peeap API, which verifies it server-side against the user's transaction_pin.
+  pin: z.string().min(4).max(12).optional(),
 });
 
 export function isFinancialCommand(command: string): boolean {
@@ -165,13 +168,17 @@ export const EcommerceMessageSchema = z.object({
 export const RegisterKeysSchema = z.object({
   device_id: z.string().min(1).max(200),
   identity_public_key: z.string().min(1),
-  signed_prekey_public: z.string().min(1),
-  signed_prekey_signature: z.string().min(1),
-  signed_prekey_id: z.number().int().min(0),
+  // Signed prekey + one-time prekeys are optional. The current ECIES message
+  // model encrypts directly to the long-term identity key, so a client may
+  // register with just its identity key. When a future X3DH/ratchet upgrade
+  // needs them, clients supply them and the server stores them as before.
+  signed_prekey_public: z.string().min(1).optional(),
+  signed_prekey_signature: z.string().optional(),
+  signed_prekey_id: z.number().int().min(0).optional(),
   one_time_prekeys: z.array(z.object({
     prekey_id: z.number().int().min(0),
     public_key: z.string().min(1),
-  })).min(1).max(100),
+  })).max(100).optional(),
 });
 
 export const ReplenishKeysSchema = z.object({

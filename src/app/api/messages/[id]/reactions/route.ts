@@ -20,6 +20,32 @@ export async function GET(
     return NextResponse.json({ error: "Unauthorized" }, { status: 401, headers });
   }
 
+  // Membership gate: a plain user may only read reactions (and the reactor
+  // user_ids) for a message in a conversation they belong to. Trusted
+  // service/platform callers are exempt.
+  if (auth.type === "user") {
+    const { data: message } = await supabase
+      .from("messages")
+      .select("conversation_id")
+      .eq("id", params.id)
+      .single();
+
+    if (!message) {
+      return NextResponse.json({ error: "Message not found" }, { status: 404, headers });
+    }
+
+    const { data: member } = await supabase
+      .from("conversation_members")
+      .select("user_id")
+      .eq("conversation_id", message.conversation_id)
+      .eq("user_id", auth.userId)
+      .single();
+
+    if (!member) {
+      return NextResponse.json({ error: "Not a member" }, { status: 403, headers });
+    }
+  }
+
   const { data: reactions, error } = await supabase
     .from("message_reactions")
     .select("id, emoji, user_id, created_at")

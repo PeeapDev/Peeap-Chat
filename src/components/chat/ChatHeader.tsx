@@ -37,11 +37,15 @@ export default function ChatHeader({ onProfileClick }: ChatHeaderProps) {
     conv.type === "school_class" ||
     conv.type === "business_channel";
 
+  // Guard against undefined members: optional chaining on the whole chain
+  // short-circuits to the literal string "undefined", which then renders in the
+  // header. Default to an empty array so the join produces a real string.
+  const memberCount = conv.member_count ?? conv.members?.length ?? 0;
   const memberNames = isGroup
-    ? conv.members
-        ?.slice(0, 3)
+    ? (conv.members ?? [])
+        .slice(0, 3)
         .map((m) => getUserDisplayName(m.profile))
-        .join(", ") + (conv.member_count > 3 ? ` +${conv.member_count - 3}` : "")
+        .join(", ") + (memberCount > 3 ? ` +${memberCount - 3}` : "")
     : null;
 
   // For direct chats, show last seen
@@ -79,7 +83,7 @@ export default function ChatHeader({ onProfileClick }: ChatHeaderProps) {
           {isGroup ? (
             <>
               <Users size={10} className="inline mr-1" />
-              {conv.member_count} members
+              {memberCount} members
               {memberNames ? ` — ${memberNames}` : ""}
             </>
           ) : otherMember?.profile?.last_seen_at ? (

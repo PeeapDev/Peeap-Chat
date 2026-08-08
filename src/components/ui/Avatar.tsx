@@ -4,7 +4,7 @@ import { getInitials, getAvatarColor } from "@/lib/utils";
 
 interface AvatarProps {
   src?: string | null;
-  name: string;
+  name?: string | null;
   id?: string;
   size?: "sm" | "md" | "lg";
   online?: boolean;
@@ -23,7 +23,8 @@ export default function Avatar({
   size = "md",
   online,
 }: AvatarProps) {
-  const colorClass = getAvatarColor(id || name);
+  const safeName = name || "?";
+  const colorClass = getAvatarColor(id || safeName);
   const sizeClass = sizes[size];
 
   return (
@@ -31,14 +32,14 @@ export default function Avatar({
       {src ? (
         <img
           src={src}
-          alt={name}
+          alt={safeName}
           className={`${sizeClass} rounded-full object-cover`}
         />
       ) : (
         <div
           className={`${sizeClass} ${colorClass} rounded-full flex items-center justify-center text-white font-medium`}
         >
-          {getInitials(name)}
+          {getInitials(safeName) || "?"}
         </div>
       )}
       {online !== undefined && (

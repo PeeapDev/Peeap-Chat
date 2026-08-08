@@ -128,8 +128,15 @@ export async function validateSessionToken(
 /**
  * Extract and validate token from request.
  * Supports:
- *   1. Authorization: Bearer <session_token> (web - SSO token from sso_tokens table)
- *   2. Authorization: Bearer <base64_payload> (mobile - legacy base64({userId, exp}))
+ *   1. Authorization: Bearer <session_token> (web/mobile - SSO token from sso_tokens table)
+ *   2. Authorization: Bearer <guest_token> (embeddable public chat)
+ *
+ * NOTE: A previous "mobile base64 payload" fallback that accepted an
+ * unsigned base64({userId, exp}) was REMOVED — it had no signature, so any
+ * caller could impersonate any user by their UUID (full auth bypass). Mobile
+ * clients must present a real SSO token from the sso_tokens table. If a signed
+ * offline token format is ever needed, it MUST carry an HMAC over the payload
+ * verified with a server secret before `userId` is trusted.
  */
 export async function authenticateRequest(
   request: NextRequest
@@ -152,44 +159,6 @@ export async function authenticateRequest(
       roles: ["guest"],
       first_name: guest.name,
     };
-  }
-
-  // Fallback: Try mobile base64 payload format ({userId, exp})
-  try {
-    const decoded = Buffer.from(token, "base64").toString("utf-8");
-    const parsed = JSON.parse(decoded);
-    if (parsed.userId && parsed.exp) {
-      // Check expiry
-      if (parsed.exp < Date.now()) return null;
-
-      // Verify user exists
-      const { data: user, error } = await mainSupabase
-        .from("users")
-        .select("id, email, phone, first_name, last_name, roles")
-        .eq("id", parsed.userId)
-        .single();
-
-      if (error || !user) return null;
-
-      let roles: string[] = [];
-      if (Array.isArray(user.roles)) {
-        roles = user.roles;
-      } else if (typeof user.roles === "string") {
-        const raw = user.roles.replace(/[{}[\]"]/g, "").trim();
-        roles = raw ? raw.split(",").map((r: string) => r.trim()) : [];
-      }
-
-      return {
-        sub: user.id,
-        email: user.email || undefined,
-        phone: user.phone || undefined,
-        roles,
-        first_name: user.first_name || undefined,
-        last_name: user.last_name || undefined,
-      };
-    }
-  } catch {
-    // Not a valid base64 payload - that's fine
   }
 
   return null;

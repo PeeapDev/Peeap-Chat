@@ -40,25 +40,44 @@ export async function PUT(
       );
     }
 
-    // Batch insert read receipts for unread messages
-    const { data: membership } = await supabase
-      .from("conversation_members")
-      .select("last_read_at")
-      .eq("conversation_id", params.id)
-      .eq("user_id", auth.sub)
-      .single();
-
-    // Get messages that haven't been read by this user
-    const { data: unreadMessages } = await supabase
+    // Get candidate (incoming, non-deleted) messages, then filter out the ones
+    // this user has already acknowledged. PostgREST's `in` takes a literal
+    // value list, NOT a SQL subquery — the previous inline subquery string
+    // never executed and left the "unread only" filter ineffective, so it
+    // re-upserted up to 500 receipts on every call.
+    const { data: candidateMessages, error: msgError } = await supabase
       .from("messages")
       .select("id")
       .eq("conversation_id", params.id)
       .eq("is_deleted", false)
       .neq("sender_id", auth.sub)
-      .not("id", "in", `(SELECT message_id FROM message_read_receipts WHERE user_id = '${auth.sub}')`)
+      .order("created_at", { ascending: false })
       .limit(500);
 
-    if (unreadMessages && unreadMessages.length > 0) {
+    if (msgError) {
+      return NextResponse.json(
+        { error: "Failed to load messages" },
+        { status: 500, headers }
+      );
+    }
+
+    const candidateIds = (candidateMessages || []).map((m) => m.id);
+
+    let alreadyReadIds = new Set<string>();
+    if (candidateIds.length > 0) {
+      const { data: existingReceipts } = await supabase
+        .from("message_read_receipts")
+        .select("message_id")
+        .eq("user_id", auth.sub)
+        .in("message_id", candidateIds);
+      alreadyReadIds = new Set((existingReceipts || []).map((r) => r.message_id));
+    }
+
+    const unreadMessages = (candidateMessages || []).filter(
+      (m) => !alreadyReadIds.has(m.id)
+    );
+
+    if (unreadMessages.length > 0) {
       const receipts = unreadMessages.map((m) => ({
         message_id: m.id,
         user_id: auth.sub,
@@ -76,7 +95,7 @@ export async function PUT(
     }
 
     return NextResponse.json(
-      { message: "Marked as read", read_count: unreadMessages?.length || 0 },
+      { message: "Marked as read", read_count: unreadMessages.length },
       { status: 200, headers }
     );
   } catch (err: any) {

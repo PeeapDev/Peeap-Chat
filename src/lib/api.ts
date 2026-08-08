@@ -120,6 +120,10 @@ class ChatAPI {
       attachments?: unknown[];
       metadata?: Record<string, unknown>;
       reply_to?: string;
+      // E2EE payload (set instead of `content` for encrypted messages)
+      is_encrypted?: boolean;
+      encrypted_content?: string;
+      encryption_metadata?: Record<string, unknown>;
     }
   ): Promise<{ message: Message }> {
     return this.request(`/api/conversations/${conversationId}/messages`, {

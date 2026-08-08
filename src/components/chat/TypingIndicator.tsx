@@ -15,6 +15,29 @@ const TYPING_TIMEOUT = 4000; // 4 seconds
 export function useTypingBroadcast() {
   const { activeConversationId, currentUserId, currentUser } = useChatContext();
   const lastSent = useRef(0);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const sendChannelRef = useRef<any>(null);
+
+  // Create ONE subscribed broadcast channel per conversation and reuse it.
+  // Previously every keystroke called supabase.channel(...) which allocated a
+  // brand-new RealtimeChannel (never removed, never subscribed) — over a
+  // session this leaked hundreds of orphaned channels and the unsubscribed
+  // .send() wasn't reliably delivered.
+  useEffect(() => {
+    if (!activeConversationId) return;
+
+    const supabase = getSupabaseBrowser();
+    if (!supabase) return;
+
+    const channel = supabase.channel(`typing:${activeConversationId}`);
+    channel.subscribe();
+    sendChannelRef.current = channel;
+
+    return () => {
+      supabase.removeChannel(channel);
+      sendChannelRef.current = null;
+    };
+  }, [activeConversationId]);
 
   function broadcastTyping() {
     if (!activeConversationId || !currentUserId) return;
@@ -23,10 +46,10 @@ export function useTypingBroadcast() {
     if (now - lastSent.current < 2000) return; // Debounce 2s
     lastSent.current = now;
 
-    const supabase = getSupabaseBrowser();
-    if (!supabase) return;
+    const channel = sendChannelRef.current;
+    if (!channel) return;
 
-    supabase.channel(`typing:${activeConversationId}`).send({
+    channel.send({
       type: "broadcast",
       event: "typing",
       payload: {

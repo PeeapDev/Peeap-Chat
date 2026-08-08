@@ -27,6 +27,8 @@ import {
   updateTabBadge,
   playMessageSound,
 } from "@/lib/notifications";
+import * as e2ee from "@/lib/e2eeManager";
+import { isEncryptableConversationType, type E2EEStatus } from "@/lib/e2eeManager";
 
 interface ChatState {
   // Auth
@@ -49,6 +51,12 @@ interface ChatState {
   // UI
   showSidebar: boolean;
   error: string | null;
+
+  // E2EE
+  e2eeStatus: E2EEStatus;
+  setupE2EE: (password: string) => Promise<void>;
+  restoreE2EE: (password: string) => Promise<void>;
+  skipE2EE: () => void;
 
   // Actions
   selectConversation: (id: string) => void;
@@ -93,45 +101,61 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   const [showSidebar, setShowSidebar] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // E2EE state
+  const [e2eeStatus, setE2eeStatus] = useState<E2EEStatus>("unknown");
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const realtimeChannelRef = useRef<any>(null);
   const conversationsRef = useRef(conversations);
   conversationsRef.current = conversations;
+  // Always-current mirror of currentUserId so the long-lived realtime handler
+  // doesn't compare against a stale closure value (self-messages would ping).
+  const currentUserIdRef = useRef(currentUserId);
+  currentUserIdRef.current = currentUserId;
+  // Tracks which conversation the user is actively viewing so late-arriving
+  // fetches for a previously-selected conversation can be dropped.
+  const activeReqRef = useRef<string | null>(null);
 
   // ── 1. Restore auth from IndexedDB or URL params ───────────
   useEffect(() => {
     if (typeof window === "undefined") return;
 
     async function restoreAuth() {
-      // Check URL params first (for backward compat links)
-      const params = new URLSearchParams(window.location.search);
-      const urlToken = params.get("token") || "";
-      const urlUserId = params.get("user_id") || "";
+      try {
+        // Check URL params first (for backward compat links)
+        const params = new URLSearchParams(window.location.search);
+        const urlToken = params.get("token") || "";
+        const urlUserId = params.get("user_id") || "";
 
-      if (urlToken) {
-        setToken(urlToken);
-        setCurrentUserId(urlUserId);
-        chatAPI.setToken(urlToken);
-        // Persist to IndexedDB
-        await saveAuth(urlToken, urlUserId, null);
-        // Clean URL
-        window.history.replaceState({}, "", window.location.pathname);
+        if (urlToken) {
+          setToken(urlToken);
+          setCurrentUserId(urlUserId);
+          chatAPI.setToken(urlToken);
+          // Remove credentials from the address bar before touching storage.
+          window.history.replaceState({}, "", window.location.pathname);
+          await saveAuth(urlToken, urlUserId, null);
+          return;
+        }
+
+        // Try to restore from IndexedDB
+        const saved = await loadAuth();
+        if (saved) {
+          setToken(saved.token);
+          setCurrentUserId(saved.userId);
+          setCurrentUser(saved.user);
+          chatAPI.setToken(saved.token);
+        }
+      } catch (err) {
+        // IndexedDB may be blocked or unavailable on some mobile browsers.
+        // Authentication can still continue through QR/SSO; never leave the
+        // entire application hidden behind a permanent loading screen.
+        console.warn("Chat auth storage unavailable:", err);
+      } finally {
         setAuthLoaded(true);
-        return;
       }
-
-      // Try to restore from IndexedDB
-      const saved = await loadAuth();
-      if (saved) {
-        setToken(saved.token);
-        setCurrentUserId(saved.userId);
-        setCurrentUser(saved.user);
-        chatAPI.setToken(saved.token);
-      }
-      setAuthLoaded(true);
     }
 
-    restoreAuth();
+    void restoreAuth();
   }, []);
 
   // ── 2. QR Login handler ────────────────────────────────────
@@ -151,6 +175,8 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     setMessages([]);
     setActiveConversationId(null);
     chatAPI.setToken("");
+    e2ee.reset();
+    setE2eeStatus("unknown");
     await clearAuth();
   }, []);
 
@@ -160,6 +186,48 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       requestNotificationPermission();
     }
   }, [token, authLoaded]);
+
+  // ── 3c. Initialise E2EE identity after auth ────────────────
+  useEffect(() => {
+    if (!token || !currentUserId || !authLoaded) return;
+    let cancelled = false;
+    e2ee.setToken(token);
+    e2ee
+      .init(currentUserId, token)
+      .then((status) => {
+        if (!cancelled) setE2eeStatus(status);
+      })
+      .catch(() => {
+        if (!cancelled) setE2eeStatus("off");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [token, currentUserId, authLoaded]);
+
+  // Decrypt any encrypted messages in a batch (no-op if E2EE isn't ready).
+  const decryptMessages = useCallback(
+    async (msgs: Message[]): Promise<Message[]> => {
+      if (!e2ee.isReady()) return msgs;
+      return Promise.all(
+        msgs.map(async (m) => {
+          if (m.is_encrypted && m.encrypted_content && m.encryption_metadata) {
+            try {
+              const text = await e2ee.decrypt(
+                m.encrypted_content,
+                m.encryption_metadata as unknown as Parameters<typeof e2ee.decrypt>[1]
+              );
+              return { ...m, content: text };
+            } catch {
+              return { ...m, content: "🔒 Unable to decrypt this message" };
+            }
+          }
+          return m;
+        })
+      );
+    },
+    []
+  );
 
   // ── 4. Load conversations: IndexedDB first, then API ──────
   useEffect(() => {
@@ -222,21 +290,42 @@ export function ChatProvider({ children }: { children: ReactNode }) {
           filter: `conversation_id=eq.${activeConversationId}`,
         },
         (payload) => {
-          const newMsg = payload.new as Message;
-          setMessages((prev) => {
-            if (prev.some((m) => m.id === newMsg.id)) return prev;
-            const updated = [...prev, newMsg];
-            saveMessages([newMsg]);
-            return updated;
-          });
-          updateConversationLastMessage(activeConversationId, newMsg);
+          const rawMsg = payload.new as Message;
 
-          // Notify if message is from someone else
-          if (newMsg.sender_id !== currentUserId) {
-            const senderName = newMsg.sender?.display_name || "Someone";
-            const body = newMsg.content || `[${newMsg.message_type}]`;
-            showNotification(senderName, body, { tag: newMsg.conversation_id });
-            playMessageSound();
+          const apply = (newMsg: Message) => {
+            setMessages((prev) => {
+              if (prev.some((m) => m.id === newMsg.id)) return prev;
+              const updated = [...prev, newMsg];
+              saveMessages([newMsg]);
+              return updated;
+            });
+            updateConversationLastMessage(activeConversationId, newMsg);
+
+            // Notify if message is from someone else
+            if (newMsg.sender_id !== currentUserIdRef.current) {
+              const senderName = newMsg.sender?.display_name || "Someone";
+              const body = newMsg.content || `[${newMsg.message_type}]`;
+              showNotification(senderName, body, { tag: newMsg.conversation_id });
+              playMessageSound();
+            }
+          };
+
+          // Decrypt E2EE messages before rendering/caching/notifying.
+          if (
+            rawMsg.is_encrypted &&
+            rawMsg.encrypted_content &&
+            rawMsg.encryption_metadata &&
+            e2ee.isReady()
+          ) {
+            e2ee
+              .decrypt(
+                rawMsg.encrypted_content,
+                rawMsg.encryption_metadata as unknown as Parameters<typeof e2ee.decrypt>[1]
+              )
+              .then((text) => apply({ ...rawMsg, content: text }))
+              .catch(() => apply({ ...rawMsg, content: "🔒 Unable to decrypt this message" }));
+          } else {
+            apply(rawMsg);
           }
         }
       )
@@ -312,13 +401,18 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   const selectConversation = useCallback(
     async (id: string) => {
       setActiveConversationId(id);
+      activeReqRef.current = id;
       setMessages([]);
       setHasMoreMessages(false);
 
       if (window.innerWidth < 768) setShowSidebar(false);
 
       // Load from IndexedDB instantly
-      const cached = await loadMessagesFromDB(id, 50);
+      const cachedRaw = await loadMessagesFromDB(id, 50);
+      // Drop if the user has since switched to another conversation.
+      if (activeReqRef.current !== id) return;
+      const cached = await decryptMessages(cachedRaw);
+      if (activeReqRef.current !== id) return;
       if (cached.length > 0) {
         setMessages(cached);
       } else {
@@ -328,10 +422,14 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       // Then fetch fresh from API
       try {
         const data = await chatAPI.getMessages(id, { limit: 50 });
-        const fresh = data.messages || [];
+        // Stale response for a conversation no longer in view — ignore it so we
+        // don't render conversation A's messages under conversation B.
+        if (activeReqRef.current !== id) return;
+        const fresh = await decryptMessages(data.messages || []);
+        if (activeReqRef.current !== id) return;
         setMessages(fresh);
         setHasMoreMessages(fresh.length >= 50);
-        // Save to IndexedDB
+        // Save decrypted copies to IndexedDB for instant offline reads.
         await saveMessages(fresh);
         // Mark as read
         chatAPI.markAsRead(id).catch(() => {});
@@ -339,11 +437,11 @@ export function ChatProvider({ children }: { children: ReactNode }) {
           prev.map((c) => (c.id === id ? { ...c, unread_count: 0 } : c))
         );
       } catch (err: unknown) {
-        if (cached.length === 0) {
+        if (activeReqRef.current === id && cached.length === 0) {
           setError(err instanceof Error ? err.message : "Failed to load messages");
         }
       } finally {
-        setLoadingMessages(false);
+        if (activeReqRef.current === id) setLoadingMessages(false);
       }
     },
     []
@@ -353,10 +451,42 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     async (content: string, type: string = "text", extra?: Record<string, unknown>) => {
       if (!activeConversationId) return;
       try {
+        const conv = conversationsRef.current.find(
+          (c) => c.id === activeConversationId
+        );
+
+        // Encrypt text for direct/group chats when E2EE is ready and every
+        // member has published a key. Otherwise fall back to a labelled
+        // plaintext send so messaging keeps working during rollout.
+        if (
+          content &&
+          isEncryptableConversationType(conv?.type) &&
+          e2ee.isReady()
+        ) {
+          const memberIds = (conv?.members || []).map((m) => m.user_id);
+          const encrypted = await e2ee.encrypt(content, memberIds);
+          if (encrypted) {
+            await chatAPI.sendMessage(activeConversationId, {
+              message_type: type as Message["message_type"],
+              is_encrypted: true,
+              encrypted_content: encrypted.encrypted_content,
+              encryption_metadata: encrypted.encryption_metadata as unknown as Record<string, unknown>,
+              ...extra,
+            });
+            return;
+          }
+        }
+
+        const encryptable = isEncryptableConversationType(conv?.type);
         await chatAPI.sendMessage(activeConversationId, {
           content,
           message_type: type as Message["message_type"],
           ...extra,
+          // Mark that an encryptable chat was sent in the clear (recipient
+          // hadn't enabled E2EE yet) so the UI can surface a "not encrypted" hint.
+          ...(encryptable
+            ? { metadata: { ...(extra?.metadata as object | undefined), e2ee_fallback: true } }
+            : {}),
         });
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : "Failed to send message");
@@ -376,10 +506,10 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         limit: 50,
         before: oldest.created_at,
       });
-      const older = data.messages || [];
+      const older = await decryptMessages(data.messages || []);
       setMessages((prev) => [...older, ...prev]);
       setHasMoreMessages(older.length >= 50);
-      // Cache older messages too
+      // Cache decrypted older messages too
       await saveMessages(older);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to load older messages");
@@ -455,6 +585,22 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  // ── E2EE actions (driven by the setup/unlock modal) ────────
+  const setupE2EE = useCallback(async (password: string) => {
+    await e2ee.setup(password);
+    setE2eeStatus(e2ee.getStatus());
+  }, []);
+
+  const restoreE2EE = useCallback(async (password: string) => {
+    await e2ee.restore(password);
+    setE2eeStatus(e2ee.getStatus());
+  }, []);
+
+  const skipE2EE = useCallback(() => {
+    e2ee.skip();
+    setE2eeStatus("off");
+  }, []);
+
   const activeConversation =
     conversations.find((c) => c.id === activeConversationId) ?? null;
 
@@ -479,6 +625,10 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         hasMoreMessages,
         showSidebar,
         error,
+        e2eeStatus,
+        setupE2EE,
+        restoreE2EE,
+        skipE2EE,
         selectConversation,
         sendMessage,
         loadMoreMessages,

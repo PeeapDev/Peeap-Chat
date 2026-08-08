@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authenticateAny } from "@/lib/auth";
-import { mainSupabase } from "@/lib/supabase";
+import { mainSupabase, supabase } from "@/lib/supabase";
 import { handleCORS, corsHeaders } from "@/lib/cors";
 
 export async function OPTIONS(request: NextRequest) {
@@ -28,10 +28,23 @@ export async function GET(
       );
     }
 
-    // Fetch user profile from main Supabase
+    // Guests (embeddable public chat) may not enumerate user profiles.
+    if (auth.type === "user" && auth.payload.roles.includes("guest")) {
+      return NextResponse.json(
+        { error: "Forbidden" },
+        { status: 403, headers }
+      );
+    }
+
+    const requesterId = auth.type === "user" ? auth.userId : null;
+
+    // Fetch user profile from main Supabase — explicit column list only, never
+    // select("*") (avoids leaking any future sensitive column into the bundle).
     const { data: user, error: userError } = await mainSupabase
       .from("users")
-      .select("*")
+      .select(
+        "id, first_name, last_name, username, email, phone, profile_picture, avatar_url, bio, account_type, roles, created_at"
+      )
       .eq("id", userId)
       .single();
 
@@ -43,17 +56,47 @@ export async function GET(
       );
     }
 
+    // Contact PII (email/phone) is only exposed to the user themselves or to
+    // someone who shares a conversation / contact relationship with them.
+    let canSeeContact = requesterId === userId;
+    if (!canSeeContact && requesterId) {
+      const [{ data: contact }, { data: sharedConvos }] = await Promise.all([
+        supabase
+          .from("contacts")
+          .select("id")
+          .eq("user_id", requesterId)
+          .eq("contact_user_id", userId)
+          .maybeSingle(),
+        supabase
+          .from("conversation_members")
+          .select("conversation_id")
+          .eq("user_id", requesterId),
+      ]);
+      if (contact) {
+        canSeeContact = true;
+      } else if (sharedConvos && sharedConvos.length > 0) {
+        const convoIds = sharedConvos.map((c) => c.conversation_id);
+        const { data: targetMembership } = await supabase
+          .from("conversation_members")
+          .select("conversation_id")
+          .eq("user_id", userId)
+          .in("conversation_id", convoIds)
+          .limit(1);
+        canSeeContact = !!(targetMembership && targetMembership.length > 0);
+      }
+    }
+
     const profile: Record<string, unknown> = {
       id: user.id,
       first_name: user.first_name,
       last_name: user.last_name,
       display_name:
         [user.first_name, user.last_name].filter(Boolean).join(" ") ||
-        user.email ||
+        user.username ||
         "Unknown",
       username: user.username || null,
-      email: user.email,
-      phone: user.phone,
+      email: canSeeContact ? user.email : null,
+      phone: canSeeContact ? user.phone : null,
       avatar_url: user.profile_picture || user.avatar_url || null,
       bio: user.bio || null,
       account_type: user.account_type || "personal",
