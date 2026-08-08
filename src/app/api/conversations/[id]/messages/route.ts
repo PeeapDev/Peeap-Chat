@@ -15,6 +15,22 @@ function getUserId(auth: AuthResult): string | null {
   return null;
 }
 
+let keywordCache: { values: string[]; loadedAt: number } | null = null;
+const KEYWORD_CACHE_MS = 5 * 60 * 1000;
+
+async function getFlagKeywords(): Promise<string[]> {
+  if (keywordCache && Date.now() - keywordCache.loadedAt < KEYWORD_CACHE_MS) {
+    return keywordCache.values;
+  }
+  const { data } = await supabase
+    .from("ai_flag_keywords")
+    .select("keyword")
+    .eq("is_active", true);
+  const values = (data || []).map((row) => String(row.keyword).toLowerCase());
+  keywordCache = { values, loadedAt: Date.now() };
+  return values;
+}
+
 // GET /api/conversations/:id/messages - Get messages (paginated)
 export async function GET(
   request: NextRequest,
@@ -81,36 +97,32 @@ export async function GET(
       );
     }
 
-    // Enrich with sender profiles
+    // Enrich with sender profiles, reactions and receipts concurrently. These
+    // were three serial database round trips on every polling refresh.
     const senderIds = [...new Set((messages || []).map((m) => m.sender_id))];
-    const profiles = await getChatUsers(senderIds);
-
-    // Get reaction counts per message
     const messageIds = (messages || []).map((m) => m.id);
     let reactionCounts = new Map<string, Record<string, number>>();
     let readByCounts = new Map<string, number>();
 
-    if (messageIds.length > 0) {
-      const { data: reactions } = await supabase
-        .from("message_reactions")
-        .select("message_id, emoji")
-        .in("message_id", messageIds);
+    const [profiles, reactionsResult, receiptsResult] = await Promise.all([
+      getChatUsers(senderIds),
+      messageIds.length > 0
+        ? supabase.from("message_reactions").select("message_id, emoji").in("message_id", messageIds)
+        : Promise.resolve({ data: [] as Array<{ message_id: string; emoji: string }> }),
+      messageIds.length > 0
+        ? supabase.from("message_read_receipts").select("message_id").in("message_id", messageIds)
+        : Promise.resolve({ data: [] as Array<{ message_id: string }> }),
+    ]);
 
-      for (const r of reactions || []) {
+      for (const r of reactionsResult.data || []) {
         const existing = reactionCounts.get(r.message_id) || {};
         existing[r.emoji] = (existing[r.emoji] || 0) + 1;
         reactionCounts.set(r.message_id, existing);
       }
 
-      const { data: readReceipts } = await supabase
-        .from("message_read_receipts")
-        .select("message_id")
-        .in("message_id", messageIds);
-
-      for (const r of readReceipts || []) {
+      for (const r of receiptsResult.data || []) {
         readByCounts.set(r.message_id, (readByCounts.get(r.message_id) || 0) + 1);
       }
-    }
 
     const enriched = (messages || []).map((msg) => ({
       ...msg,
@@ -160,13 +172,19 @@ export async function POST(
       );
     }
 
-    // Check membership
-    const { data: membership } = await supabase
-      .from("conversation_members")
-      .select("role, permissions")
-      .eq("conversation_id", params.id)
-      .eq("user_id", userId)
-      .single();
+    // Membership and conversation policy are independent reads.
+    const [membershipResult, conversationResult] = await Promise.all([
+      supabase.from("conversation_members")
+        .select("role, permissions")
+        .eq("conversation_id", params.id)
+        .eq("user_id", userId)
+        .single(),
+      supabase.from("conversations")
+        .select("is_announcement_only")
+        .eq("id", params.id)
+        .single(),
+    ]);
+    const membership = membershipResult.data;
 
     if (!membership) {
       return NextResponse.json(
@@ -176,11 +194,7 @@ export async function POST(
     }
 
     // Check announcement-only restriction
-    const { data: conversation } = await supabase
-      .from("conversations")
-      .select("is_announcement_only")
-      .eq("id", params.id)
-      .single();
+    const conversation = conversationResult.data;
 
     if (
       conversation?.is_announcement_only &&
@@ -221,16 +235,10 @@ export async function POST(
     // AI keyword check
     let aiFlagged = false;
     if (content) {
-      const { data: keywords } = await supabase
-        .from("ai_flag_keywords")
-        .select("keyword")
-        .eq("is_active", true);
-
-      if (keywords && keywords.length > 0) {
+      const keywords = await getFlagKeywords();
+      if (keywords.length > 0) {
         const lowerContent = content.toLowerCase();
-        aiFlagged = keywords.some((k) =>
-          lowerContent.includes(k.keyword.toLowerCase())
-        );
+        aiFlagged = keywords.some((keyword) => lowerContent.includes(keyword));
       }
     }
 
@@ -240,7 +248,10 @@ export async function POST(
       .insert({
         conversation_id: params.id,
         sender_id: userId,
-        content: is_encrypted ? "[encrypted]" : (content || null),
+        // Encrypted messages may include a plaintext delivery fallback for
+        // multi-device accounts whose local key no longer matches the latest
+        // published key. Older clients omit it and retain the old placeholder.
+        content: content || (is_encrypted ? "[encrypted]" : null),
         message_type,
         rich_content: rich_content || null,
         attachments: attachments || [],

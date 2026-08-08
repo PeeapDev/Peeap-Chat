@@ -130,6 +130,12 @@ export async function POST(
             method: "POST",
             headers: {
               "Content-Type": "application/json",
+              // Preserve the user's Peeap session. The payment API authorizes
+              // the sender from this token; X-User-Id alone is not an auth
+              // mechanism and previously made every Chat transfer fail.
+              ...(request.headers.get("authorization")
+                ? { Authorization: request.headers.get("authorization") as string }
+                : {}),
               "X-Service-Secret": SERVICE_SECRET,
               "X-User-Id": userId,
             },
@@ -146,7 +152,7 @@ export async function POST(
 
           const transferData = await transferRes.json();
           if (!transferRes.ok) {
-            throw new Error(transferData.error || "Transfer failed");
+            throw new Error(transferData.message || transferData.error_description || transferData.error || "Transfer failed");
           }
 
           // The main API returns camelCase (transactionId). Accept both so the
