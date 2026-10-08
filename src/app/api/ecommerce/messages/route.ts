@@ -5,6 +5,8 @@ import { getChatUser } from "@/lib/users";
 import { handleCORS, corsHeaders } from "@/lib/cors";
 import { EcommerceMessageSchema } from "@/lib/validation";
 
+const SHIPPING_USER_ID = "00000000-0000-4000-8000-000000000003";
+
 export async function OPTIONS(request: NextRequest) {
   return handleCORS(request) || NextResponse.json({});
 }
@@ -33,7 +35,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { order_id, store_id, buyer_user_id, seller_user_id, category, content, rich_content, tracking_number, driver_user_id, idempotency_key } = parsed.data;
+    const { order_id, store_id, buyer_user_id, seller_user_id, category, content, rich_content, tracking_number, driver_user_id } = parsed.data;
+    const isVendorNotice = buyer_user_id === seller_user_id;
+    const status = typeof rich_content?.new_status === "string" ? rich_content.new_status : category;
+    const idempotency_key = parsed.data.idempotency_key ||
+      ((category === "shipping_update" || category === "delivery_confirmed" || category === "driver_assigned")
+        ? `shipping:${order_id}:${category}:${status}:${buyer_user_id}:${seller_user_id}:${driver_user_id || ""}`
+        : undefined);
 
     if (idempotency_key) {
       const { data: existing } = await supabase
@@ -53,7 +61,18 @@ export async function POST(request: NextRequest) {
     // For driver_assigned, the conversation is between driver and buyer
     const isDriverMessage = category === "driver_assigned" && driver_user_id;
     const participant1 = isDriverMessage ? driver_user_id : buyer_user_id;
-    const participant2 = isDriverMessage ? buyer_user_id : seller_user_id;
+    const participant2 = isDriverMessage ? buyer_user_id : isVendorNotice ? SHIPPING_USER_ID : seller_user_id;
+
+    if (isVendorNotice) {
+      const { error: systemUserError } = await supabase.from("chat_users").upsert({
+        auth_user_id: SHIPPING_USER_ID,
+        display_name: "Peeap Shipping",
+        account_type: "system",
+        roles: ["system"],
+        status: "active",
+      }, { onConflict: "auth_user_id" });
+      if (systemUserError) throw systemUserError;
+    }
 
     // Ensure both users exist in chat_users
     await Promise.all([
@@ -127,7 +146,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Determine sender based on category
-    const senderId = isDriverMessage ? driver_user_id : seller_user_id;
+    const senderId = isDriverMessage ? driver_user_id : isVendorNotice ? SHIPPING_USER_ID : seller_user_id;
 
     // Create the message
     const { data: message, error: msgError } = await supabase
@@ -144,6 +163,12 @@ export async function POST(request: NextRequest) {
       .single();
 
     if (msgError) {
+      if (msgError.code === "23505" && idempotency_key) {
+        const { data: existing } = await supabase.from("messages")
+          .select("id, conversation_id, created_at")
+          .contains("metadata", { idempotency_key }).maybeSingle();
+        if (existing) return NextResponse.json({ message: existing, conversation_id: existing.conversation_id, deduplicated: true }, { headers });
+      }
       console.error("Failed to create message:", msgError);
       return NextResponse.json(
         { error: "Failed to create message" },
@@ -173,7 +198,7 @@ export async function POST(request: NextRequest) {
 
     // ── Create notification on the main Peeap Supabase (for NotificationBell) ──
     // This ensures the bell shows unread chat messages.
-    const recipientId = isDriverMessage ? buyer_user_id : (senderId === buyer_user_id ? seller_user_id : buyer_user_id);
+    const recipientId = isDriverMessage ? buyer_user_id : isVendorNotice ? seller_user_id : (senderId === buyer_user_id ? seller_user_id : buyer_user_id);
     if (recipientId) {
       try {
         const MAIN_API = process.env.MAIN_API_URL || "https://api.peeap.com";

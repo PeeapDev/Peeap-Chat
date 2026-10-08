@@ -89,7 +89,16 @@ export async function POST(request: NextRequest) {
         source_id: input.source_id,
       },
     }).select().single();
-    if (messageError) throw messageError;
+    if (messageError) {
+      if (messageError.code === "23505") {
+        const { data: existingMessage } = await supabase.from("messages")
+          .select("id, conversation_id, created_at")
+          .contains("metadata", { idempotency_key: input.idempotency_key }).maybeSingle();
+        if (existingMessage) return NextResponse.json({ message: existingMessage,
+          conversation_id: existingMessage.conversation_id, deduplicated: true }, { status: 200, headers });
+      }
+      throw messageError;
+    }
 
     let notificationDelivered = false;
     try {
