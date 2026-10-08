@@ -8,3 +8,4 @@ out/
 .env.chat-*
 supabase/.temp/
 *.tsbuildinfo
+.env*
